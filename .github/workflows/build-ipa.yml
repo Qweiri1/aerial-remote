@@ -34,7 +34,7 @@ jobs:
 
       - name: 编译（不签名）
         run: |
-          set -o pipefail
+          set +e
           xcodebuild \
             -project AerialRemote.xcodeproj \
             -scheme AerialRemote \
@@ -46,7 +46,16 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            build | tail -n 80
+            build > xcodebuild.log 2>&1
+          RC=$?
+          echo "xcodebuild 退出码 = $RC"
+          echo "===== 错误行 ====="
+          grep -nE "error:|fatal error:" xcodebuild.log | head -50
+          if [ $RC -ne 0 ]; then
+            echo "===== 日志尾部 ====="
+            tail -50 xcodebuild.log
+            exit $RC
+          fi
 
       - name: 打包成 ipa
         run: |
