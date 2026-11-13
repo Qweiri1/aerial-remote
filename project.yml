@@ -20,6 +20,10 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: app
+    dependencies:
+      # 控制中心那颗「遥控器」：iOS 18 的 ControlWidget 必须活在扩展里
+      - target: RemoteWidgets
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: tv.aerial.remote
@@ -51,3 +55,27 @@ targets:
           - _http._tcp
     scheme:
       testTargets: []
+
+  RemoteWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: app_widget
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.aerial.remote.widgets
+        PRODUCT_NAME: RemoteWidgets
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: "YES"
+        GENERATE_INFOPLIST_FILE: "NO"
+        SUPPORTS_MACCATALYST: "NO"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: "NO"
+    info:
+      path: app_widget/Info.plist
+      properties:
+        CFBundleDisplayName: 遥控器
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
