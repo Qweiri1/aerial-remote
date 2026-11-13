@@ -29,6 +29,16 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
     private var errorBox: UIStackView!
     private var errorLabel: UILabel!
 
+    // MARK: - 触感
+    // 网页里的 navigator.vibrate 在 WKWebView 里不存在（iOS 从来没实现过 Vibration API），
+    // 所以页面把「该震了」这件事通过 messageHandlers.haptic 丢给这里，由原生真的震。
+    private let hapticLight  = UIImpactFeedbackGenerator(style: .light)
+    private let hapticMedium = UIImpactFeedbackGenerator(style: .medium)
+    private let hapticHeavy  = UIImpactFeedbackGenerator(style: .heavy)
+    private let hapticRigid  = UIImpactFeedbackGenerator(style: .rigid)
+    private let hapticSoft   = UIImpactFeedbackGenerator(style: .soft)
+    private let hapticNotify = UINotificationFeedbackGenerator()
+
     private var serverBase: String {
         var s = (UserDefaults.standard.string(forKey: Self.serverKey) ?? Self.defaultServer)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,6 +56,7 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
         setupWebView()
         setupBar()
         setupErrorBox()
+        prepareHaptics()
 
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(keyboardWillChange(_:)),
@@ -59,6 +70,9 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
 
     deinit {
         pollTimer?.invalidate()
+        // 消息处理器是被 userContentController 强引用的，不解绑会和自己形成循环
+        webView?.configuration.userContentController
+            .removeScriptMessageHandler(forName: "haptic")
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -71,6 +85,11 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
         conf.allowsInlineMediaPlayback = true
         conf.allowsPictureInPictureMediaPlayback = true
         conf.mediaTypesRequiringUserActionForPlayback = []
+
+        // 网页 → 原生：haptic 通道
+        let ucc = WKUserContentController()
+        ucc.add(self, name: "haptic")
+        conf.userContentController = ucc
 
         let wv = WKWebView(frame: .zero, configuration: conf)
         wv.backgroundColor = .black
@@ -166,6 +185,28 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
             stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -32),
         ])
         errorBox = stack
+    }
+
+    // MARK: - 触感
+
+    fileprivate func prepareHaptics() {
+        hapticLight.prepare(); hapticMedium.prepare(); hapticHeavy.prepare()
+        hapticRigid.prepare(); hapticSoft.prepare(); hapticNotify.prepare()
+    }
+
+    /// 网页里 haptic('light'|'medium'|'heavy'|'rigid'|'soft') 的落点
+    fileprivate func fireHaptic(_ kind: String) {
+        switch kind {
+        case "heavy":   hapticHeavy.impactOccurred()
+        case "medium":  hapticMedium.impactOccurred()
+        case "rigid":   hapticRigid.impactOccurred()
+        case "soft":    hapticSoft.impactOccurred()
+        case "success": hapticNotify.notificationOccurred(.success)
+        case "warning": hapticNotify.notificationOccurred(.warning)
+        case "error":   hapticNotify.notificationOccurred(.error)
+        default:        hapticLight.impactOccurred()
+        }
+        prepareHaptics()          // 震完立刻预热，下一次点下去才跟手
     }
 
     // MARK: - 加载
@@ -314,11 +355,22 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
     }
 }
 
+// MARK: - WKScriptMessageHandler
+
+extension RemoteViewController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "haptic" else { return }
+        fireHaptic((message.body as? String) ?? "light")
+    }
+}
+
 // MARK: - WKNavigationDelegate
 
 extension RemoteViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         errorBox.isHidden = true
+        prepareHaptics()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
