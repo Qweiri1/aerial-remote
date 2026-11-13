@@ -1,0 +1,66 @@
+name: build-ipa
+
+# 在 GitHub 的 macOS 机器上编译出未签名 ipa。
+# 用法：仓库根目录就是这个工程，进 Actions 跑 build-ipa，
+# 跑完在 Artifacts 里下 AerialRemote-ipa.zip，解压得到 AerialRemote-unsigned.ipa，
+# 用你自己的证书（爱思 / Sideloadly / 签名服务）签一下即可安装。
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          sw_vers
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: |
+          xcodegen generate
+          ls -la
+          xcodebuild -list -project AerialRemote.xcodeproj
+
+      - name: 编译（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AerialRemote.xcodeproj \
+            -scheme AerialRemote \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build | tail -n 80
+
+      - name: 打包成 ipa
+        run: |
+          APP="build/Build/Products/Release-iphoneos/AerialRemote.app"
+          test -d "$APP" || { echo "找不到 .app"; find build -name "*.app" -maxdepth 6; exit 1; }
+          rm -rf Payload AerialRemote-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload AerialRemote-unsigned.ipa
+          ls -lh AerialRemote-unsigned.ipa
+          unzip -l AerialRemote-unsigned.ipa | head -20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AerialRemote-ipa
+          path: AerialRemote-unsigned.ipa
+          if-no-files-found: error
