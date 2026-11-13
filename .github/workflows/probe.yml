@@ -3,6 +3,10 @@ on:
   workflow_dispatch:
 jobs:
   t:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-13, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - run: echo hello
+      - run: uname -a
