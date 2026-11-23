@@ -1,5 +1,7 @@
 import UIKit
 import WebKit
+import AVFoundation
+import MediaPlayer
 
 /// 原生遥控器：整个界面还是那张网页（和手机 Safari 里看到的完全一样），
 /// 但「输入框 + 键盘」换成原生的，原因有两条，都只有原生能解：
@@ -28,6 +30,25 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
 
     private var errorBox: UIStackView!
     private var errorLabel: UILabel!
+
+    // MARK: - 手机音量键 → 电视音量
+    // 原理：iOS 的音量键不产生任何事件，只会改当前音频会话的音量。
+    // 所以把会话设成 .playback 并挂一个静音循环播放器占住会话，
+    // KVO 监听 outputVolume 的变化来“听出”按键方向，然后：
+    //   1. 用隐藏 MPVolumeView 把手机音量拴回中间值（手机音量从此不动）；
+    //   2. 把电视音量 ±5 发给服务端；
+    //   3. evaluateJavaScript 同步网页滑条。
+    // 退到后台时释放会话，手机音量键恢复控制手机。
+    private var volumeView: MPVolumeView!
+    private var volumeSlider: UISlider?
+    private var silencePlayer: AVAudioPlayer?
+    private var volKvoStarted = false
+    private var volKvoCtx = 0
+    private var lastPhoneVol: Float = -1
+    private var tvVol = -1                    // 电视当前音量，靠 /api/ime 轮询跟踪
+    private var volSeq = 0
+    private var suppressRestoreEcho = false
+    private var appActive = true
 
     // MARK: - 触感
     // 网页里的 navigator.vibrate 在 WKWebView 里不存在（iOS 从来没实现过 Vibration API），
@@ -70,6 +91,10 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
 
     deinit {
         pollTimer?.invalidate()
+        if volKvoStarted {
+            AVAudioSession.sharedInstance().removeObserver(
+                self, forKeyPath: "outputVolume", context: &volKvoCtx)
+        }
         // 消息处理器是被 userContentController 强引用的，不解绑会和自己形成循环
         webView?.configuration.userContentController
             .removeScriptMessageHandler(forName: "haptic")
@@ -77,6 +102,160 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        setupVolumeKeys()
+    }
+
+    // MARK: - 音量键接管
+
+    private func setupVolumeKeys() {
+        guard volumeView == nil else { return }
+        // MPVolumeView 不能 isHidden，只把它扔到屏幕外
+        volumeView = MPVolumeView(frame: CGRect(x: -120, y: -120, width: 1, height: 1))
+        view.addSubview(volumeView)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.volumeSlider = self?.volumeView.subviews.compactMap { $0 as? UISlider }.first
+        }
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(volAppState),
+                       name: UIApplication.didBecomeActiveNotification, object: nil)
+        nc.addObserver(self, selector: #selector(volAppState),
+                       name: UIApplication.willResignActiveNotification, object: nil)
+        volAppState()
+    }
+
+    @objc private func volAppState() {
+        appActive = UIApplication.shared.applicationState == .active
+        if appActive { startVolumeCapture() } else { stopVolumeCapture() }
+    }
+
+    private func startVolumeCapture() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, options: [.mixWithOthers])
+        try? session.setActive(true)
+        if silencePlayer == nil {
+            silencePlayer = Self.silentLoopPlayer()
+            silencePlayer?.numberOfLoops = -1
+            silencePlayer?.volume = 0.01     // 人耳听不见，但足以占住“正在播放”状态
+        }
+        if !(silencePlayer?.isPlaying ?? false) { silencePlayer?.play() }
+        if !volKvoStarted {
+            session.addObserver(self, forKeyPath: "outputVolume",
+                                options: [.new], context: &volKvoCtx)
+            volKvoStarted = true
+        }
+        // 手机音量拴在中间：上下都留出按鍵余地，永远不会卡在边界
+        DispatchQueue.main.async { [weak self] in
+            self?.volumeSlider?.value = 0.5
+        }
+        lastPhoneVol = 0.5
+        suppressRestoreEcho = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.suppressRestoreEcho = false
+        }
+        refreshTVVolume()
+    }
+
+    private func stopVolumeCapture() {
+        if volKvoStarted {
+            AVAudioSession.sharedInstance().removeObserver(
+                self, forKeyPath: "outputVolume", context: &volKvoCtx)
+            volKvoStarted = false
+        }
+        silencePlayer?.pause()
+        try? AVAudioSession.sharedInstance()
+            .setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// 内存里现造一秒静音 WAV，不用往包里塞音频文件
+    private static func silentLoopPlayer() -> AVAudioPlayer? {
+        let sr = 44100
+        let samples = sr
+        var d = Data()
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        u32(0x46464952); u32(UInt32(36 + samples * 2)); u32(0x45564157)
+        u32(0x20746D66); u32(16); u16(1); u16(1)
+        u32(UInt32(sr)); u32(UInt32(sr * 2)); u16(2); u16(16)
+        u32(0x61746164); u32(UInt32(samples * 2))
+        d.append(contentsOf: [UInt8](repeating: 0, count: samples * 2))
+        return try? AVAudioPlayer(data: d)
+    }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        guard context == &volKvoCtx, keyPath == "outputVolume" else {
+            super.observeValue(forKeyPath: keyPath, of: object,
+                               change: change, context: context)
+            return
+        }
+        let newV = (change?[.newKey] as? Float) ?? AVAudioSession.sharedInstance().outputVolume
+        handlePhoneVolumeChange(newV)
+    }
+
+    private func handlePhoneVolumeChange(_ newV: Float) {
+        // 把手机音量拴回去这个动作本身也会触发 KVO，别当成按键
+        if suppressRestoreEcho {
+            if abs(newV - lastPhoneVol) < 0.001 { suppressRestoreEcho = false }
+            return
+        }
+        guard appActive, lastPhoneVol >= 0, lastPhoneVol != newV else {
+            lastPhoneVol = newV
+            return
+        }
+        let dir: Int = newV > lastPhoneVol ? 1 : -1
+        lastPhoneVol = 0.5
+        suppressRestoreEcho = true
+        DispatchQueue.main.async { [weak self] in
+            self?.volumeSlider?.value = 0.5        // 手机音量永远拴回中间值
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.suppressRestoreEcho = false
+        }
+        let step = 5
+        let target = max(0, min(100, (tvVol < 0 ? 50 : tvVol) + dir * step))
+        sendTVVolume(target)
+    }
+
+    private func sendTVVolume(_ v: Int) {
+        tvVol = v
+        syncSlider(v)                              // 先画，回头以服务器回读为准
+        guard let url = URL(string: serverBase + "api/volume") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["value": v, "verify": true])
+        req.timeoutInterval = 5
+        volSeq += 1
+        let seq = volSeq
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self, let data = data,
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let vol = obj["vol"] as? Int, seq == self.volSeq else { return }
+            DispatchQueue.main.async {
+                self.tvVol = vol
+                self.syncSlider(vol)
+            }
+        }.resume()
+    }
+
+    private func refreshTVVolume() {
+        guard let url = URL(string: serverBase + "api/volume") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self = self, let data = data,
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let vol = obj["vol"] as? Int else { return }
+            DispatchQueue.main.async { self.tvVol = vol }
+        }.resume()
+    }
+
+    private func syncSlider(_ v: Int) {
+        webView.evaluateJavaScript("window.__tvVolPaint && __tvVolPaint(\(v))",
+                                   completionHandler: nil)
+    }
 
     // MARK: - 界面
 
@@ -283,6 +462,8 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let shown = obj["shown"] as? Bool else { return }
             DispatchQueue.main.async {
+                // 顺带跟踪电视音量：网页滑条或别的入口改了音量，这里 0.55s 内就跟上
+                if let vol = obj["vol"] as? Int { self.tvVol = vol }
                 if shown {
                     self.offStreak = 0
                     self.showBar()
