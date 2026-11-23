@@ -54,7 +54,7 @@ struct PowerOnWidgetView: View {
     var entry: PowerEntry
 
     var body: some View {
-        AppIntentButton(action: PowerOnIntent()) {
+        Button(intent: PowerOnIntent()) {
             VStack(spacing: 8) {
                 Image(systemName: "tv.inset.filled.badge.play")
                     .font(.system(size: 38, weight: .semibold))
