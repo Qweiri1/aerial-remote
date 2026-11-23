@@ -20,6 +20,7 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: app
+      - path: shared
     dependencies:
       # 控制中心那颗「遥控器」：iOS 18 的 ControlWidget 必须活在扩展里
       - target: RemoteWidgets
@@ -62,6 +63,7 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: app_widget
+      - path: shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: tv.aerial.remote.widgets
