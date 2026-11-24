@@ -47,7 +47,8 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
     private var lastPhoneVol: Float = -1
     private var tvVol = -1                    // 电视当前音量，靠 /api/ime 轮询跟踪
     private var volSeq = 0
-    private var suppressRestoreEcho = false
+    private let volBaseline: Float = 0.5      // 手机音量固定拴在这里
+    private var volSyncWork: DispatchWorkItem?
     private var appActive = true
 
     // MARK: - 触感
@@ -146,15 +147,11 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
                                 options: [.new], context: &volKvoCtx)
             volKvoStarted = true
         }
-        // 手机音量拴在中间：上下都留出按鍵余地，永远不会卡在边界
+        // 手机音量拴在中间：上下都留出按键余地，永远不会卡在边界
         DispatchQueue.main.async { [weak self] in
-            self?.volumeSlider?.value = 0.5
+            self?.volumeSlider?.value = self?.volBaseline ?? 0.5
         }
-        lastPhoneVol = 0.5
-        suppressRestoreEcho = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.suppressRestoreEcho = false
-        }
+        lastPhoneVol = volBaseline
         refreshTVVolume()
     }
 
@@ -197,44 +194,48 @@ final class RemoteViewController: UIViewController, UITextFieldDelegate {
     }
 
     private func handlePhoneVolumeChange(_ newV: Float) {
-        // 把手机音量拴回去这个动作本身也会触发 KVO，别当成按键
-        if suppressRestoreEcho {
-            if abs(newV - lastPhoneVol) < 0.001 { suppressRestoreEcho = false }
+        // 手机音量被我们拴在 0.5：读到 0.5 就是「拴回去」的回声，不是按键。
+        // （以前用 0.5 秒的抑制窗口，长按时按键会被当成回声吞掉 —— 卡顿的真凶）
+        if abs(newV - volBaseline) < 0.001 {
+            lastPhoneVol = volBaseline
             return
         }
-        guard appActive, lastPhoneVol >= 0, lastPhoneVol != newV else {
-            lastPhoneVol = newV
-            return
-        }
-        let dir: Int = newV > lastPhoneVol ? 1 : -1
-        lastPhoneVol = 0.5
-        suppressRestoreEcho = true
+        guard appActive else { lastPhoneVol = newV; return }
+        let dir: Int = newV > volBaseline ? 1 : -1
+        lastPhoneVol = volBaseline
         DispatchQueue.main.async { [weak self] in
-            self?.volumeSlider?.value = 0.5        // 手机音量永远拴回中间值
+            self?.volumeSlider?.value = self?.volBaseline ?? 0.5     // 手机音量拴回中间值
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.suppressRestoreEcho = false
+        // 电视音量本地立刻推进，不等网络回执 —— 长按才是连续丝滑的
+        let base = tvVol < 0 ? 50 : tvVol
+        let target = max(0, min(100, base + dir * 2))
+        tvVol = target
+        syncSlider(target)
+        sendTVVolume(target, verify: false)
+        // 松手 450ms 后校准一次真值（管道丢发 / 延迟在这一发补回来）
+        volSyncWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self = self, self.tvVol >= 0 else { return }
+            self.sendTVVolume(self.tvVol, verify: true)
         }
-        let step = 5
-        let target = max(0, min(100, (tvVol < 0 ? 50 : tvVol) + dir * step))
-        sendTVVolume(target)
+        volSyncWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: w)
     }
 
-    private func sendTVVolume(_ v: Int) {
-        tvVol = v
-        syncSlider(v)                              // 先画，回头以服务器回读为准
+    private func sendTVVolume(_ v: Int, verify: Bool) {
         guard let url = URL(string: serverBase + "api/volume") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["value": v, "verify": true])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["value": v, "verify": verify])
         req.timeoutInterval = 5
         volSeq += 1
         let seq = volSeq
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let self = self, let data = data,
+            guard let self = self, verify, seq == self.volSeq,
+                  let data = data,
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let vol = obj["vol"] as? Int, seq == self.volSeq else { return }
+                  let vol = obj["vol"] as? Int else { return }
             DispatchQueue.main.async {
                 self.tvVol = vol
                 self.syncSlider(vol)

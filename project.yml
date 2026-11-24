@@ -30,8 +30,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: tv.aerial.remote
         PRODUCT_NAME: AerialRemote
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: "NO"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SUPPORTS_MACCATALYST: "NO"
@@ -40,8 +40,8 @@ targets:
       path: app/Info.plist
       properties:
         CFBundleDisplayName: 遥控器
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UIStatusBarStyle: UIStatusBarStyleLightContent
@@ -54,6 +54,10 @@ targets:
         NSLocalNetworkUsageDescription: 需要访问局域网里的电视遥控服务（aerial.local:8899）。
         NSBonjourServices:
           - _http._tcp
+        CFBundleURLTypes:
+          - CFBundleURLName: tv.aerial.remote
+            CFBundleURLSchemes:
+              - aerialremote
     scheme:
       testTargets: []
 
@@ -77,7 +81,13 @@ targets:
       path: app_widget/Info.plist
       properties:
         CFBundleDisplayName: 遥控器
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 需要访问局域网里的电视遥控服务（aerial.local:8899）。
+        NSBonjourServices:
+          - _http._tcp
